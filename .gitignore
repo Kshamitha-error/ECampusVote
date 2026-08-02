@@ -1,0 +1,16 @@
+# Backend
+backend/.env
+backend/__pycache__/
+backend/voting.db
+backend/uploads/
+backend/instance/
+
+# Frontend
+frontend/node_modules/
+frontend/.env
+frontend/.env.local
+frontend/build/
+
+# General
+*.pyc
+.DS_Store
