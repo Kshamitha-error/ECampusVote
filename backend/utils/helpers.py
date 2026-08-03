@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
-import bcrypt, random, string, re, os, smtplib
+import bcrypt
+import random
+import string
+import re
+import os
+import requests
 from datetime import datetime, timedelta
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from dotenv import load_dotenv
 
 # NOTE: this is an in-memory store. It resets on every server restart and
 # will NOT work correctly if the app is ever run with more than one worker
-# process (e.g. `gunicorn -w 4`) since each worker has its own memory. Fine
+# process (e.g. gunicorn -w 4) since each worker has its own memory. Fine
 # for a single-process college deployment; if this ever needs to scale,
 # move this into the database or Redis instead.
 _otp_store = {}
@@ -72,7 +76,7 @@ def hash_password(password):
 
 
 def check_password(plain, hashed):
-    # FIX: was a bare `except:` that silently swallowed every possible
+    # FIX: was a bare except: that silently swallowed every possible
     # error (including real bugs like a corrupted hash). Now only the
     # errors we actually expect from bad/missing input are caught.
     if not plain or not hashed:
@@ -83,48 +87,63 @@ def check_password(plain, hashed):
         return False
 
 
-# ── Gmail SMTP ────────────────────────────────────────────────────────────────
+# ── Brevo Email API ───────────────────────────────────────────────────────────
+
+load_dotenv(override=True)
+
 
 def _send_email(to_email, to_name, subject, body_text):
-    from dotenv import load_dotenv
-    load_dotenv(override=True)
+    api_key = os.environ.get("BREVO_API_KEY", "").strip()
 
-    # Strip ALL surrounding whitespace and quotes that .env might add
-    mail_username = os.environ.get("MAIL_USERNAME", "").strip().strip('"').strip("'")
-    mail_password = os.environ.get("MAIL_PASSWORD", "").strip().strip('"').strip("'")
-
-    if not mail_username or not mail_password:
-        print("[EMAIL ERROR] MAIL_USERNAME or MAIL_PASSWORD not set in .env")
+    if not api_key:
+        print("[EMAIL ERROR] BREVO_API_KEY not found in environment variables")
         return
 
     if not to_email or "@" not in str(to_email):
-        print(f"[EMAIL ERROR] Invalid recipient: '{to_email}'")
+        print(f"[EMAIL ERROR] Invalid recipient: {to_email}")
         return
 
-    print(f"[EMAIL] Sending '{subject}' to {to_email} ...")
+    sender_email = "ecampusvote23009@gmail.com"
+    sender_name = "eCampus Vote"
+
+    headers = {
+        "accept": "application/json",
+        "api-key": api_key,
+        "content-type": "application/json"
+    }
+
+    payload = {
+        "sender": {
+            "name": sender_name,
+            "email": sender_email
+        },
+        "to": [
+            {
+                "email": to_email,
+                "name": to_name or "Student"
+            }
+        ],
+        "subject": subject,
+        "textContent": body_text
+    }
+
+    print(f"[EMAIL] Sending '{subject}' to {to_email}...")
+
     try:
-        msg = MIMEMultipart()
-        msg["From"]    = f"eCampus Vote <{mail_username}>"
-        msg["To"]      = to_email
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body_text, "plain", "utf-8"))
+        response = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
 
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(mail_username, mail_password)
-            server.sendmail(mail_username, to_email, msg.as_string())
+        if response.status_code in (200, 201):
+            print(f"[EMAIL OK] → {to_email}")
+        else:
+            print(f"[EMAIL ERROR] Status Code: {response.status_code}")
+            print(response.text)
 
-        print(f"[EMAIL OK] → {to_email}")
-
-    except smtplib.SMTPAuthenticationError:
-        print("[EMAIL ERROR] Gmail auth failed — verify App Password has no quotes in .env")
-    except smtplib.SMTPRecipientsRefused:
-        print(f"[EMAIL ERROR] Recipient refused: {to_email}")
-    except smtplib.SMTPException as e:
-        print(f"[EMAIL SMTP ERROR] {e}")
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         print(f"[EMAIL ERROR] {e}")
 
 
