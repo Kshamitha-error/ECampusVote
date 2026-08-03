@@ -13,6 +13,17 @@ def create_app():
     app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///voting.db")
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+    # FIX: Render's free Postgres occasionally drops idle connections, which
+    # SQLAlchemy would then try to reuse and fail with errors like
+    # "SSL error: decryption failed or bad record mac". pool_pre_ping tests
+    # each connection with a lightweight query before using it and silently
+    # reconnects if it's dead; pool_recycle proactively refreshes connections
+    # before they get old enough to be killed server-side.
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "pool_pre_ping": True,
+        "pool_recycle": 280,
+    }
+
     secret = os.getenv("JWT_SECRET_KEY", "")
     if not secret:
         # FIX: no more hardcoded fallback secret. If missing, generate one for
