@@ -1,7 +1,7 @@
 import os, uuid, csv, io
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models.models import Student
+from models.models import Student, Vote, Notification
 from extensions import db
 
 upload_bp = Blueprint("uploads", __name__, url_prefix="/api/uploads")
@@ -139,10 +139,24 @@ def list_students():
 def delete_student(student_id):
     if not is_admin():
         return jsonify({"error": "Admin access required."}), 403
-    student = Student.query.get_or_404(student_id)
-    db.session.delete(student)
-    db.session.commit()
-    return jsonify({"message": "Student removed."}), 200
+    try:
+        student = Student.query.get_or_404(student_id)
+        # FIX: this used to call db.session.delete(student) directly, which
+        # fails with an IntegrityError the moment that student has any Vote
+        # or Notification rows pointing at them (foreign key constraint on
+        # Postgres) — the request would 500 out with no explanation, and the
+        # frontend just showed a generic "Delete failed." Deleting the
+        # dependent rows first (in the same transaction) lets the student
+        # delete actually succeed.
+        Vote.query.filter_by(student_id=student.id).delete(synchronize_session=False)
+        Notification.query.filter_by(student_id=student.id).delete(synchronize_session=False)
+        db.session.delete(student)
+        db.session.commit()
+        return jsonify({"message": "Student removed."}), 200
+    except Exception as ex:
+        db.session.rollback()
+        print("DELETE STUDENT ERROR:", ex)
+        return jsonify({"error": "Failed to remove student."}), 500
 
 
 @upload_bp.route("/students/bulk-delete", methods=["POST"])
@@ -154,9 +168,20 @@ def bulk_delete_students():
     ids  = data.get("ids", [])
     if not ids:
         return jsonify({"error": "No IDs provided."}), 400
-    Student.query.filter(Student.id.in_(ids)).delete(synchronize_session=False)
-    db.session.commit()
-    return jsonify({"message": f"{len(ids)} students removed."}), 200
+    try:
+        # FIX: same foreign-key issue as delete_student — a bulk DELETE on
+        # Student directly failed silently (500, unhandled) whenever any of
+        # the selected students had existing votes or notifications. Clear
+        # the dependent rows for these student IDs first.
+        Vote.query.filter(Vote.student_id.in_(ids)).delete(synchronize_session=False)
+        Notification.query.filter(Notification.student_id.in_(ids)).delete(synchronize_session=False)
+        Student.query.filter(Student.id.in_(ids)).delete(synchronize_session=False)
+        db.session.commit()
+        return jsonify({"message": f"{len(ids)} students removed."}), 200
+    except Exception as ex:
+        db.session.rollback()
+        print("BULK DELETE STUDENTS ERROR:", ex)
+        return jsonify({"error": "Failed to remove students."}), 500
 
 
 @upload_bp.route("/students/rollover/preview", methods=["GET"])
@@ -173,9 +198,19 @@ def rollover_preview():
 def remove_passouts():
     if not is_admin():
         return jsonify({"error": "Admin access required."}), 403
-    n = Student.query.filter_by(year=4).delete()
-    db.session.commit()
-    return jsonify({"message": f"{n} 4th-year students removed."}), 200
+    try:
+        # FIX: same foreign-key issue — 4th years with votes/notifications
+        # would block this bulk delete too.
+        passout_ids = [s.id for s in Student.query.filter_by(year=4).all()]
+        Vote.query.filter(Vote.student_id.in_(passout_ids)).delete(synchronize_session=False)
+        Notification.query.filter(Notification.student_id.in_(passout_ids)).delete(synchronize_session=False)
+        n = Student.query.filter_by(year=4).delete()
+        db.session.commit()
+        return jsonify({"message": f"{n} 4th-year students removed."}), 200
+    except Exception as ex:
+        db.session.rollback()
+        print("REMOVE PASSOUTS ERROR:", ex)
+        return jsonify({"error": "Failed to remove passouts."}), 500
 
 
 @upload_bp.route("/students/rollover/upgrade-years", methods=["POST"])
@@ -198,6 +233,15 @@ def reset_all_students():
     confirm = data.get("confirm", "")
     if confirm != "DELETE":
         return jsonify({"error": "Type DELETE to confirm."}), 400
-    n = Student.query.delete()
-    db.session.commit()
-    return jsonify({"message": f"All {n} students removed."}), 200
+    try:
+        # FIX: same foreign-key issue — wiping all students would fail if
+        # any Vote/Notification rows existed anywhere.
+        Vote.query.delete(synchronize_session=False)
+        Notification.query.delete(synchronize_session=False)
+        n = Student.query.delete()
+        db.session.commit()
+        return jsonify({"message": f"All {n} students removed."}), 200
+    except Exception as ex:
+        db.session.rollback()
+        print("RESET ALL STUDENTS ERROR:", ex)
+        return jsonify({"error": "Failed to reset students."}), 500
